@@ -1,10 +1,20 @@
 from typing import Optional, Generic, TypeVar, List
 from typing_extensions import Annotated
-
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.concurrency import asynccontextmanager
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, select
+from fastapi import APIRouter, Depends
+from authentificate import router as auth_router, get_current_active_user
+
+app = FastAPI()
+
+from fastapi import APIRouter
+games_router = APIRouter(
+    prefix="/api/v1",
+    tags=["games"],
+    dependencies=[Depends(get_current_active_user)]  # <-- protects all games endpoints
+)
 
 # import the db helpers
 from database import engine, get_session, create_db_and_tables
@@ -93,10 +103,11 @@ async def lifespan(app: FastAPI):
             session.commit()
     yield
 
-app = FastAPI(root_path="/api/v1", lifespan=lifespan)
+# ⬇️ Minimal change: attach lifespan instead of recreating the app
+app.router.lifespan_context = lifespan
 
-# ---------- Routes ----------
-@app.get("/games", response_model=PaginatedResponse[List[Game]])
+# ---------- Routes (moved onto the protected games_router) ----------
+@games_router.get("/games", response_model=PaginatedResponse[List[Game]])
 def read_games(
     request: Request,
     session: SessionDep,
@@ -113,14 +124,14 @@ def read_games(
 
     return {"data": items, "next": next_url, "previous": prev_url}
 
-@app.get("/games/{id}", response_model=ApiResponse[Game])
+@games_router.get("/games/{id}", response_model=ApiResponse[Game])
 def read_game(id: int, session: SessionDep):
     row = session.get(Game, id)
     if not row:
         raise HTTPException(status_code=404, detail="Game not found")
     return {"data": row}
 
-@app.post("/games", response_model=ApiResponse[Game], status_code=201)
+@games_router.post("/games", response_model=ApiResponse[Game], status_code=201)
 def create_game(game: GameCreate, session: SessionDep):
     db_game = Game.model_validate(game)  # pydantic v2
     session.add(db_game)
@@ -128,7 +139,7 @@ def create_game(game: GameCreate, session: SessionDep):
     session.refresh(db_game)
     return {"data": db_game}
 
-@app.put("/games/{id}", response_model=ApiResponse[Game])
+@games_router.put("/games/{id}", response_model=ApiResponse[Game])
 def update_game(id: int, game: GameCreate, session: SessionDep):
     row = session.get(Game, id)
     if not row:
@@ -139,10 +150,13 @@ def update_game(id: int, game: GameCreate, session: SessionDep):
     session.refresh(row)
     return {"data": row}
 
-@app.delete("/games/{id}", status_code=204)
+@games_router.delete("/games/{id}", status_code=204)
 def delete_game(id: int, session: SessionDep):
     row = session.get(Game, id)
     if not row:
         raise HTTPException(status_code=404, detail="Game not found")
     session.delete(row)
     session.commit()
+
+app.include_router(auth_router)     # <-- adds /register, /token, /users/me
+app.include_router(games_router)    # <-- adds /api/v1/games/* (protected)
